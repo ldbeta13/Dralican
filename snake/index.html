@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snake con giro</title>
+<style>
+  :root {
+    --bg: #10141c;
+    --panel: #1a2130;
+    --grid: #202a3c;
+    --text: #e8edf5;
+    --muted: #8a96aa;
+    --snake: #4ade80;
+    --head: #bbf7d0;
+    --fruit: #f87171;
+    --gold: #fbbf24;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding: 16px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  h1 { margin: 0; font-size: 1.4rem; letter-spacing: 0.02em; }
+  .hud {
+    display: flex;
+    gap: 10px;
+    width: min(480px, 100%);
+  }
+  .stat {
+    flex: 1;
+    background: var(--panel);
+    border-radius: 10px;
+    padding: 8px 12px;
+    text-align: center;
+  }
+  .stat span { display: block; font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+  .stat b { font-size: 1.3rem; font-variant-numeric: tabular-nums; }
+  .board {
+    position: relative;
+    width: min(480px, 100%);
+    aspect-ratio: 1;
+  }
+  canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+    background: var(--panel);
+    border-radius: 12px;
+    touch-action: none;
+  }
+  .overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    background: rgba(16, 20, 28, 0.82);
+    border-radius: 12px;
+    text-align: center;
+    padding: 20px;
+  }
+  .overlay[hidden] { display: none; }
+  .overlay h2 { margin: 0; font-size: 1.6rem; }
+  .overlay p { margin: 0; color: var(--muted); line-height: 1.5; }
+  button {
+    font: inherit;
+    font-weight: 600;
+    color: #0b1f12;
+    background: var(--snake);
+    border: 0;
+    border-radius: 8px;
+    padding: 10px 22px;
+    cursor: pointer;
+  }
+  button:hover { filter: brightness(1.1); }
+  .hint { color: var(--muted); font-size: 0.85rem; text-align: center; }
+  .gold { color: var(--gold); }
+</style>
+</head>
+<body>
+  <h1>Snake con giro</h1>
+
+  <div class="hud">
+    <div class="stat"><span>Puntos</span><b id="score">0</b></div>
+    <div class="stat"><span>Récord</span><b id="best">0</b></div>
+    <div class="stat"><span>Velocidad</span><b id="speed">1</b></div>
+  </div>
+
+  <div class="board">
+    <canvas id="game" width="480" height="480"></canvas>
+    <div class="overlay" id="overlay">
+      <h2 id="overlayTitle">Snake con giro</h2>
+      <p id="overlayText">Cada fruta te acelera.<br>Las <span class="gold">doradas</span> valen 5 pero desaparecen rápido.</p>
+      <button id="startBtn">Jugar</button>
+    </div>
+  </div>
+
+  <div class="hint">Flechas o WASD para moverte · Espacio para pausar · Desliza en pantallas táctiles</div>
+
+<script>
+(() => {
+  const COLS = 20;
+  const CELL = 24;
+  const START_DELAY = 140;   // ms por paso
+  const MIN_DELAY = 60;
+  const DELAY_STEP = 4;      // ms que se restan por fruta
+  const GOLD_CHANCE = 0.25;
+  const GOLD_LIFETIME = 5000;
+  const GOLD_POINTS = 5;
+  const BEST_KEY = 'snake-con-giro-best';
+
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const scoreEl = document.getElementById('score');
+  const bestEl = document.getElementById('best');
+  const speedEl = document.getElementById('speed');
+  const overlay = document.getElementById('overlay');
+  const overlayTitle = document.getElementById('overlayTitle');
+  const overlayText = document.getElementById('overlayText');
+  const startBtn = document.getElementById('startBtn');
+
+  const css = getComputedStyle(document.documentElement);
+  const color = name => css.getPropertyValue(name).trim();
+  const COLORS = {
+    grid: color('--grid'),
+    snake: color('--snake'),
+    head: color('--head'),
+    fruit: color('--fruit'),
+    gold: color('--gold'),
+  };
+
+  let snake, dir, queue, fruit, gold, score, delay, state, lastStep, pausedAt;
+  let best = loadBest();
+  bestEl.textContent = best;
+
+  function loadBest() {
+    try { return Number(localStorage.getItem(BEST_KEY)) || 0; } catch { return 0; }
+  }
+  function saveBest() {
+    try { localStorage.setItem(BEST_KEY, String(best)); } catch {}
+  }
+
+  function reset() {
+    snake = [{ x: 10, y: 10 }, { x: 9, y: 10 }, { x: 8, y: 10 }];
+    dir = { x: 1, y: 0 };
+    queue = [];
+    score = 0;
+    delay = START_DELAY;
+    gold = null;
+    fruit = randomFreeCell();
+    updateHud();
+  }
+
+  function randomFreeCell() {
+    const free = [];
+    for (let y = 0; y < COLS; y++) {
+      for (let x = 0; x < COLS; x++) {
+        const taken = snake.some(s => s.x === x && s.y === y) ||
+          (fruit && fruit.x === x && fruit.y === y) ||
+          (gold && gold.x === x && gold.y === y);
+        if (!taken) free.push({ x, y });
+      }
+    }
+    return free.length ? free[Math.floor(Math.random() * free.length)] : null;
+  }
+
+  function updateHud() {
+    scoreEl.textContent = score;
+    bestEl.textContent = best;
+    speedEl.textContent = 1 + Math.round((START_DELAY - delay) / DELAY_STEP);
+  }
+
+  function start() {
+    reset();
+    state = 'playing';
+    overlay.hidden = true;
+    lastStep = performance.now();
+  }
+
+  function gameOver(won) {
+    state = 'over';
+    const record = score > best;
+    if (record) { best = score; saveBest(); }
+    updateHud();
+    overlayTitle.textContent = won ? '¡Llenaste el tablero!' : 'Fin del juego';
+    overlayText.innerHTML = `Puntos: <b>${score}</b>` + (record ? '<br><span class="gold">¡Nuevo récord!</span>' : '');
+    startBtn.textContent = 'Jugar de nuevo';
+    overlay.hidden = false;
+  }
+
+  function togglePause() {
+    if (state === 'playing') {
+      state = 'paused';
+      pausedAt = performance.now();
+      overlayTitle.textContent = 'Pausa';
+      overlayText.textContent = 'Pulsa Espacio para continuar.';
+      startBtn.textContent = 'Continuar';
+      overlay.hidden = false;
+    } else if (state === 'paused') {
+      // El tiempo en pausa no cuenta para la fruta dorada
+      const elapsed = performance.now() - pausedAt;
+      if (gold) gold.expires += elapsed;
+      lastStep = performance.now();
+      state = 'playing';
+      overlay.hidden = true;
+    }
+  }
+
+  function turn(x, y) {
+    if (state !== 'playing') return;
+    const last = queue.length ? queue[queue.length - 1] : dir;
+    // Ignora giros de 180° y repeticiones de la misma dirección
+    if (last.x === x && last.y === y) return;
+    if (last.x === -x && last.y === -y) return;
+    if (queue.length < 2) queue.push({ x, y });
+  }
+
+  function step(now) {
+    if (queue.length) dir = queue.shift();
+    const head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
+
+    if (head.x < 0 || head.y < 0 || head.x >= COLS || head.y >= COLS) return gameOver(false);
+
+    const ateFruit = head.x === fruit.x && head.y === fruit.y;
+    const ateGold = gold && head.x === gold.x && head.y === gold.y;
+    const grows = ateFruit || ateGold;
+
+    // La cola se mueve en este paso, así que solo choca si la serpiente crece
+    const body = grows ? snake : snake.slice(0, -1);
+    if (body.some(s => s.x === head.x && s.y === head.y)) return gameOver(false);
+
+    snake.unshift(head);
+    if (!grows) snake.pop();
+
+    if (ateGold) {
+      score += GOLD_POINTS;
+      gold = null;
+    }
+    if (ateFruit) {
+      score += 1;
+      delay = Math.max(MIN_DELAY, delay - DELAY_STEP);
+      fruit = null;
+      fruit = randomFreeCell();
+      if (!fruit) return gameOver(true);
+      if (!gold && Math.random() < GOLD_CHANCE) {
+        const cell = randomFreeCell();
+        if (cell) gold = { ...cell, expires: now + GOLD_LIFETIME };
+      }
+    }
+    if (gold && now >= gold.expires) gold = null;
+    updateHud();
+  }
+
+  function draw(now) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    ctx.fillStyle = COLORS.grid;
+    for (let y = 0; y < COLS; y++) {
+      for (let x = 0; x < COLS; x++) {
+        if ((x + y) % 2 === 0) ctx.fillRect(x * CELL, y * CELL, CELL, CELL);
+      }
+    }
+
+    if (fruit) drawDot(fruit, COLORS.fruit, 0.36);
+    if (gold) {
+      const left = (gold.expires - (state === 'paused' ? pausedAt : now)) / GOLD_LIFETIME;
+      // Parpadea en el último tercio de su vida
+      const visible = left > 0.33 || Math.floor(now / 120) % 2 === 0;
+      if (visible) drawDot(gold, COLORS.gold, 0.3 + 0.12 * Math.max(0, left));
+    }
+
+    snake.forEach((s, i) => {
+      ctx.fillStyle = i === 0 ? COLORS.head : COLORS.snake;
+      roundRect(s.x * CELL + 2, s.y * CELL + 2, CELL - 4, CELL - 4, 6);
+    });
+  }
+
+  function drawDot(cell, fill, radius) {
+    ctx.fillStyle = fill;
+    ctx.beginPath();
+    ctx.arc((cell.x + 0.5) * CELL, (cell.y + 0.5) * CELL, CELL * radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.fill();
+  }
+
+  function loop(now) {
+    if (state === 'playing') {
+      // Como mucho un paso por frame para no saltar celdas tras una pestaña inactiva
+      if (now - lastStep >= delay) {
+        lastStep = now;
+        step(now);
+      }
+    }
+    draw(now);
+    requestAnimationFrame(loop);
+  }
+
+  const KEYS = {
+    ArrowUp: [0, -1], w: [0, -1], W: [0, -1],
+    ArrowDown: [0, 1], s: [0, 1], S: [0, 1],
+    ArrowLeft: [-1, 0], a: [-1, 0], A: [-1, 0],
+    ArrowRight: [1, 0], d: [1, 0], D: [1, 0],
+  };
+
+  document.addEventListener('keydown', e => {
+    if (e.key === ' ') {
+      e.preventDefault();
+      if (state === 'playing' || state === 'paused') togglePause();
+      else start();
+      return;
+    }
+    const k = KEYS[e.key];
+    if (k) {
+      e.preventDefault();
+      turn(k[0], k[1]);
+    }
+  });
+
+  startBtn.addEventListener('click', () => {
+    if (state === 'paused') togglePause();
+    else start();
+    startBtn.blur();
+  });
+
+  let touchStart = null;
+  canvas.addEventListener('pointerdown', e => { touchStart = { x: e.clientX, y: e.clientY }; });
+  canvas.addEventListener('pointerup', e => {
+    if (!touchStart) return;
+    const dx = e.clientX - touchStart.x;
+    const dy = e.clientY - touchStart.y;
+    touchStart = null;
+    if (Math.max(Math.abs(dx), Math.abs(dy)) < 20) return;
+    if (Math.abs(dx) > Math.abs(dy)) turn(Math.sign(dx), 0);
+    else turn(0, Math.sign(dy));
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && state === 'playing') togglePause();
+  });
+
+  reset();
+  state = 'idle';
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
